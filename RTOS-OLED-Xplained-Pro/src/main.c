@@ -17,10 +17,15 @@
 #define BTN_PIO PIOA
 #define BTN_PIO_ID ID_PIOA
 #define BTN_PIO_PIN 11
-#define BTN_PIO_PIN_MASK (1 << BTN_PIO_PIN)
+#define BTN_PIO_PIN_MASK (1u << BTN_PIO_PIN)
 
+#define BUZZER_PIO PIOD
+#define BUZZER_PIO_ID  ID_PIOD
+#define BUZZER_PIO_PIN 30
+#define BUZZER_PIO_PIN_MASK (1u << BUZZER_PIO_PIN)
 
-
+#define NOTE_B5  988
+#define NOTE_E6  1319
 /************************************************************************/
 /* prototypes and types                                                 */
 /************************************************************************/
@@ -36,8 +41,17 @@ void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
 /************************************************************************/
 /* RTOS application funcs                                               */
 /************************************************************************/
-#define TASK_OLED_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
+#define TASK_OLED_STACK_SIZE                (1024*4/sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+#define TASK_PLAY_STACK_SIZE                (1024*4/sizeof(portSTACK_TYPE))
+#define TASK_PLAY_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+#define TASK_COINS_STACK_SIZE                (1024*4/sizeof(portSTACK_TYPE))
+#define TASK_COINS_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+SemaphoreHandle_t xSemaphoreInit;
+QueueHandle_t xQueueCoins;
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
 extern void vApplicationIdleHook(void);
@@ -63,9 +77,42 @@ extern void vApplicationMallocFailedHook(void) {
 /************************************************************************/
 
 void but_callback(void) {
-
+	xSemaphoreGiveFromISR(xSemaphoreInit, 0);
 }
 
+void set_buzzer(void);
+
+void set_buzzer(void){
+	pio_clear(BUZZER_PIO, BUZZER_PIO_PIN_MASK);
+}
+
+void clear_buzzer(void);
+
+void clear_buzzer(void){
+	pio_set(BUZZER_PIO, BUZZER_PIO_PIN_MASK);
+}
+void buzzer_test(int freq);
+
+void buzzer_test(int freq){
+	set_buzzer();
+	delay_us(freq);
+	clear_buzzer();
+	delay_us(freq);
+}
+void tone(int freq, int time);
+
+void tone(int freq, int	time){
+	
+	int t = (1000000/freq);
+	int ciclo = time*1000/(2*t);
+
+		
+	for (int i = 0; i<ciclo; i++){
+		buzzer_test(t);
+	}
+	
+	
+}
 
 /************************************************************************/
 /* TASKS                                                                */
@@ -83,13 +130,49 @@ static void task_debug(void *pvParameters) {
 
 	}
 }
+static void task_coins(void *pvParameters){
+	btn_init();
+	int i = 0;
+	int t = 0;
+	int coins = 0;
+	RTT_init(32000,0,0);
+	for(;;){
+		if(xSemaphoreTake(xSemaphoreInit, 0)){
+			if(i==0){
+				t = rtt_read_timer_value(RTT);
+				printf("Seed: %d \n",t);
+				srand(t);
+				i++;
+			}
+			coins = rand() % 3 + 1;
+			printf("Coins: %d \n",coins);
+			xQueueSend(xQueueCoins, &coins,0);
+		}
 
+	}
+}
 
+static void task_play(void *pvParameters){
+	int coins = 0;
+	for(;;){
+		if(xQueueReceive(xQueueCoins,&coins,1000)){
+			for(int num_coins = 0; num_coins<coins;num_coins++){
+				tone(NOTE_B5,  80);
+				tone(NOTE_E6, 640);
+			}
+		}
+
+	}
+}
 
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
 
+void init_periph(void){
+	pmc_enable_periph_clk(BUZZER_PIO_ID);
+	pio_set_output(BUZZER_PIO,BUZZER_PIO_PIN_MASK,0,0,0);
+}
 void btn_init(void) {
 	// Inicializa clock do periférico PIO responsavel pelo botao
 	pmc_enable_periph_clk(BTN_PIO_ID);
@@ -169,14 +252,35 @@ int main(void) {
 	/* Initialize the SAM system */
 	sysclk_init();
 	board_init();
-
+	
 	/* Initialize the console uart */
 	configure_console();
+	xSemaphoreInit = xSemaphoreCreateBinary();
+	if (xSemaphoreInit == NULL)
+	printf("falha em criar o semaforo \n");
 	
+	xQueueCoins = xQueueCreate(32, sizeof(int));
+	if (xQueueCoins == NULL)
+	printf("falha em criar a queue Coins \n");
+	
+	
+	init_periph();
+	
+	tone(NOTE_B5,  80);
+	tone(NOTE_E6, 640);
+	if (xTaskCreate(task_play, "play", TASK_PLAY_STACK_SIZE, NULL,
+	TASK_PLAY_STACK_PRIORITY+1, NULL) != pdPASS) {
+		printf("Failed to create play task\r\n");
+	}
 	if (xTaskCreate(task_debug, "debug", TASK_OLED_STACK_SIZE, NULL,
 	TASK_OLED_STACK_PRIORITY, NULL) != pdPASS) {
 		printf("Failed to create debug task\r\n");
 	}
+	if (xTaskCreate(task_coins, "coins", TASK_COINS_STACK_SIZE, NULL,
+	TASK_COINS_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create coins task\r\n");
+	}
+	
 
 	/* Start the scheduler. */
 	vTaskStartScheduler();
